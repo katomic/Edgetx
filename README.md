@@ -10,7 +10,7 @@ This lua script needs to be in the SCRIPTS\FUNCTIONS folder on the radio's SD ca
 In this example, Switches SB (3-pos) and SD (2-pos) must **both** be in the down position for the script to be executed.
 
 # OTXSim 
-This lua script was tested on the  application and a Radiomaster TX15 ONLY! 
+This lua script was tested on the Companion application and a Radiomaster TX15 ONLY! 
 
 Add this in its own folder under the WIDGETS Folder on the SD or card or the SD folder for the Companion (I used 2.12.5 to test this)
 
