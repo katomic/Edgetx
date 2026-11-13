@@ -1,5 +1,5 @@
-# Edgetx
-This lua script was tested on a Radiomaster TX15 ONLY! 
+# OTXSim 
+This lua script was tested on the  application and a Radiomaster TX15 ONLY! 
 
 Add this in its own folder under the WIDGETS Folder on the SD or card or the SD folder for the Companion (I used 2.12.5 to test this)
 
