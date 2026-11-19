@@ -48,6 +48,13 @@ AUTO DETECTION
     When not full screen, the camera view is set by the widget's "View"
     option: 1 = 3/4, 2 = Rear, 3 = Side, 4 = Top.
     Widget option "Labels" turns the surface tags on or off.
+    Widget options "Wings", "Fuselage", "Tail" and "Surfaces" set the colours.
+    The fin is drawn a shade darker than Tail; flaps a lighter and the rudder
+    a darker shade of Surfaces.
+    Propeller: drawn as a shaded disc while the throttle output is above -99%,
+    and as a thin bar (stopped prop) at idle. The throttle channel is found from the
+    output/mixer names (Thr, Mot, ESC, Eng) or set with widget option "ThrCh"
+    (0 = auto). With none found, the throttle stick is used.
 
 HISTORY
          13/11/2026    Ported to EdgeTX colour widget (TX15 480x320),
@@ -279,7 +286,10 @@ local function typeFromText(raw)
   if n == '' then return nil end
   if string.find(n, 'tip') then return 3 end
   if string.find(n, 'ail') or string.find(n, 'flaperon') then return 2 end
-  if string.find(n, 'fl') then return 1 end
+  -- short aileron names: "Ai", "R Ai", "AiL", "Ai2" ...
+  if string.find(n, '^[rl]?ai[rl]?%d?$') then return 2 end
+  -- flaps: "Flap", "Flaps", "Flp", "FlR", "R Fl" ... (not "Rflx" = reflex)
+  if string.find(n, 'flap') or string.find(n, 'flp') or string.find(n, '^[rl]?fl[rl]?%d?$') then return 1 end
   if string.find(n, 'vee') or string.find(n, 'vtail') or string.find(n, 'rvat') or string.find(n, 'ruddervator')
      or (string.sub(n, 1, 1) == 'v' and #n <= 3) then return 6 end
   if string.find(n, 'el') then return 4 end   -- ele, elev, elevator
@@ -295,7 +305,7 @@ local function sideOf(raw)
   if string.find(s, 'right') or string.find(s, 'rght') then return RIGHT end
   if string.find(s, 'left') or string.find(s, 'lft') then return LEFT end
   -- remove the surface words so their own letters (aiL, fLap, ...) don't count
-  for _, kw in ipairs({'flaperon', 'aileron', 'ailrn', 'ail', 'flap', 'flp', 'fl', 'tip',
+  for _, kw in ipairs({'flaperon', 'aileron', 'ailrn', 'ail', 'ai', 'flap', 'flp', 'fl', 'tip',
                        'ruddervator', 'vtail', 'vee', 'elevator', 'elev', 'ele', 'rudder', 'rud'}) do
     s = string.gsub(s, kw, '')
   end
@@ -339,7 +349,10 @@ local function autoAssign(w)
       end
     end
     t = t or SURF_OTHER
-    for _, n in ipairs(names) do side = side or sideOf(n) end
+    -- side: from the output name, or from mixer lines naming the same surface type
+    for k, n in ipairs(names) do
+      if k == 1 or typeFromText(n) == t then side = side or sideOf(n) end
+    end
     w.chAssign[i] = {type = t, side = side or RIGHT, rot = ROT_NORMAL, sideKnown = side ~= nil}
     if w.surf[t].hasLR then
       groups[t] = groups[t] or {}
@@ -448,6 +461,64 @@ local function chanPercent(w, i)
   return (getValue(w.chId[i]) or 0) / 10.24
 end
 
+-- Final channel output in percent, as shown in Companion's "Channel Outputs"
+-- (used for the surfaces, the prop and the channel list):
+-- after limits, servo reverse and special-function overrides (e.g. an
+-- Override Channel used to hold the throttle at -100% while disarmed).
+-- getValue('chN') above returns the mixer result before all of that.
+local function outputPercent(w, i)
+  if getOutputValue then
+    return (getOutputValue(i - 1) or 0) / 10.24
+  end
+  return chanPercent(w, i)
+end
+
+-- ===========================================================================
+-- Throttle channel
+-- ===========================================================================
+local throttlePct
+-- Find the throttle channel: output name first (Thr / Mot / ESC / Eng), then a
+-- mixer line whose name or source is the throttle. nil if none found.
+local function detectThrottle()
+  for i = 1, N_CHANS do
+    local out = model.getOutput(i - 1)
+    local n = clean(out and out.name)
+    if n ~= '' and (string.find(n, 'thr') or string.find(n, 'mot') or string.find(n, 'esc')
+                    or string.find(n, 'eng')) then
+      return i
+    end
+  end
+  for i = 1, N_CHANS do
+    local names, srcs = channelTexts(i - 1)
+    for k = 2, #names do if string.find(clean(names[k]), 'thr') then return i end end
+    for _, sn in ipairs(srcs) do if string.find(clean(sn), 'thr') then return i end end
+  end
+  return nil
+end
+
+local function setThrottleChannel(w)
+  local opt = w.options and w.options.ThrCh or 0
+  if opt and opt >= 1 and opt <= N_CHANS then
+    w.thrCh = opt
+  else
+    w.thrCh = detectThrottle()
+  end
+  if not w.thrCh then
+    local fi = getFieldInfo('thr')        -- fall back to the throttle stick itself
+    w.thrStickId = fi and fi.id or nil
+  end
+end
+
+-- Throttle channel's final output in percent (honours the widget's Reverse setting)
+throttlePct = function(w)
+  if w.thrCh then
+    return outputPercent(w, w.thrCh) * w.chAssign[w.thrCh].rot
+  elseif w.thrStickId then
+    return (getValue(w.thrStickId) or -1024) / 10.24
+  end
+  return -100
+end
+
 -- ===========================================================================
 -- 3D model view (lightweight)
 --   Model space: x = right wing, y = up, z = rearward (nose -z, tail +z)
@@ -473,13 +544,57 @@ for _, v in ipairs(VIEWS) do
 end
 
 -- base colours {r,g,b}
-local K_AIRFRAME = {238, 241, 247}
 local K_CANOPY   = {28, 44, 66}
-local K_WHEEL    = {48, 56, 70}
-local K_FIN      = {165, 172, 186}
-local K_SURF     = {95, 240, 255}
-local K_FLAP     = {175, 250, 255}
-local K_RUDDER   = {70, 150, 240}
+
+-- Airframe colours come from the widget options (see colourSet below)
+local DEF_WING, DEF_FUSE, DEF_TAIL, DEF_SURF =
+  {238, 241, 247}, {238, 241, 247}, {238, 241, 247}, {95, 240, 255}
+
+-- EdgeTX colour flag -> {r,g,b}. RGB colours hold RGB565 in the upper 16 bits
+-- plus RGB_FLAG (0x8000). Colours picked on the colour editor's Theme tab are
+-- stored as a theme index instead; lcd.getColor() resolves those to RGB.
+local function flagToRGB(flag, def)
+  if type(flag) ~= 'number' then return def end
+  if floor(flag / 0x8000) % 2 ~= 1 then
+    local ok, rgb = false, nil
+    if lcd and lcd.getColor then ok, rgb = pcall(lcd.getColor, flag) end
+    if not ok or type(rgb) ~= 'number' or floor(rgb / 0x8000) % 2 ~= 1 then return def end
+    flag = rgb
+  end
+  local v = floor(flag / 0x10000) % 0x10000
+  return {floor(floor(v / 2048) % 32 * 255 / 31 + 0.5),
+          floor(floor(v / 32) % 64 * 255 / 63 + 0.5),
+          floor(v % 32 * 255 / 31 + 0.5)}
+end
+
+local function scaleK(k, f)
+  return {math.min(255, floor(k[1]*f)), math.min(255, floor(k[2]*f)), math.min(255, floor(k[3]*f))}
+end
+
+local function towardWhite(k, f)
+  return {floor(k[1] + (255 - k[1])*f), floor(k[2] + (255 - k[2])*f), floor(k[3] + (255 - k[3])*f)}
+end
+
+-- Build the colour set from the widget options. Returns true if it changed.
+local function colourSet(w)
+  local o = w.options or {}
+  local wing = flagToRGB(o.Wings, DEF_WING)
+  local fuse = flagToRGB(o.Fuselage, DEF_FUSE)
+  local tail = flagToRGB(o.Tail, DEF_TAIL)
+  local surf = flagToRGB(o.Surfaces, DEF_SURF)
+  local key = table.concat(wing, ',') .. ';' .. table.concat(fuse, ',') .. ';' ..
+              table.concat(tail, ',') .. ';' .. table.concat(surf, ',')
+  if key == w.colourKey then return false end
+  w.colourKey = key
+  w.K = {
+    wing = wing, fuse = fuse, tail = tail,
+    fin  = scaleK(tail, 0.72),          -- fin a shade darker than the tailplane
+    surf = surf,
+    flap = towardWhite(surf, 0.45),     -- flaps a lighter shade
+    rud  = scaleK(surf, 0.72),          -- rudder a darker shade
+  }
+  return true
+end
 
 -- light direction in view space, normalised
 local LX, LY, LZ = -0.30, 0.55, 0.78
@@ -505,7 +620,10 @@ end
 -- ---------------------------------------------------------------------------
 local WING_Y, WING_T = 0.24, 0.05     -- wing top surface, thickness (front face)
 local WING_LE, WING_HINGE = -0.38, 0.18
-local SURF_CHORD, SURF_T = 0.17, 0.03
+local SURF_SCALE = 1.25                 -- size of movable surfaces (1.0 = original)
+local SURF_CHORD, SURF_T = 0.17 * SURF_SCALE, 0.03
+local TAIL_CHORD = 0.15 * SURF_SCALE    -- elevator / ruddervator
+local RUD_CHORD  = 0.13 * SURF_SCALE
 local ROOT_X, TIP_X = 0.24, 1.95
 local STAB_HINGE, FIN_HINGE = 1.95, 1.98
 
@@ -528,13 +646,15 @@ end
 local buildHingeDefs   -- defined below
 
 local function buildStatic(w)
+  if not w.K then colourSet(w) end
   local P = {}
   local slots, has = wingSlots(w)
   w.slots, w.has = slots, has
 
-  -- fuselage: 6-sided, 3 segments
-  local rings = {{-1.15, 0.0, 0}, {-0.98, 0.19, 0}, {0.45, 0.19, 0}, {2.05, 0.045, 0.03}}
-  local N, prev = 6, nil
+  -- fuselage: 4-sided box section (flat top, bottom and sides), 3 segments.
+  -- Ring radius is to the corners, so x1.25 keeps roughly the old width.
+  local rings = {{-1.15, 0.0, 0}, {-0.98, 0.24, 0}, {0.45, 0.24, 0}, {2.05, 0.06, 0.03}}
+  local N, prev = 4, nil
   for _, rg in ipairs(rings) do
     local ring = {}
     for i = 0, N - 1 do
@@ -544,7 +664,7 @@ local function buildStatic(w)
     if prev then
       for i = 0, N - 1 do
         local j = (i + 1) % N
-        quad(P, prev[i], prev[j], ring[j], ring[i], K_AIRFRAME)
+        quad(P, prev[i], prev[j], ring[j], ring[i], w.K.fuse)
       end
     end
     prev = ring
@@ -556,35 +676,22 @@ local function buildStatic(w)
 
   -- wing: 3 spanwise plates (helps depth sorting) + leading-edge face
   for _, sp in ipairs({{-2.0, -0.25}, {-0.25, 0.25}, {0.25, 2.0}}) do
-    hplate(P, sp[1], sp[2], WING_Y, WING_LE, WING_HINGE, K_AIRFRAME)
+    hplate(P, sp[1], sp[2], WING_Y, WING_LE, WING_HINGE, w.K.wing)
   end
   quad(P, V(-2.0, WING_Y, WING_LE), V(2.0, WING_Y, WING_LE), V(2.0, WING_Y - WING_T, WING_LE),
-       V(-2.0, WING_Y - WING_T, WING_LE), K_AIRFRAME)
+       V(-2.0, WING_Y - WING_T, WING_LE), w.K.wing)
 
   -- fixed trailing-edge strips where nothing is assigned
   local function fixedTE(x0, x1)
-    hplate(P, x0, x1, WING_Y - 0.01, WING_HINGE, WING_HINGE + SURF_CHORD, K_AIRFRAME)
-    hplate(P, -x1, -x0, WING_Y - 0.01, WING_HINGE, WING_HINGE + SURF_CHORD, K_AIRFRAME)
+    hplate(P, x0, x1, WING_Y - 0.01, WING_HINGE, WING_HINGE + SURF_CHORD, w.K.wing)
+    hplate(P, -x1, -x0, WING_Y - 0.01, WING_HINGE, WING_HINGE + SURF_CHORD, w.K.wing)
   end
   fixedTE(0.0, ROOT_X)
   if not has[1] then fixedTE(slots[1][1], slots[1][2]) end
   if not has[2] and not has[3] then fixedTE(1.03, TIP_X) end
   if has[3] and not has[2] then fixedTE(1.03, 1.50) end
 
-  -- struts / gear legs (lines)
-  w.lines = {}
-  local function ln(a, b) w.lines[#w.lines + 1] = {a, b} end
-  for _, s in ipairs({1, -1}) do
-    ln(V(s*0.15, -0.12, -0.15), V(s*1.05, WING_Y - WING_T, -0.15))
-    ln(V(s*0.12, -0.15, -0.10), V(s*0.42, -0.58, -0.05))
-  end
-  ln(V(0, -0.18, -0.85), V(0, -0.60, -0.88))
-
-  -- wheels: hexagons in the y-z plane
-  local U, W2 = V(0, 1, 0), V(0, 0, 1)
-  ngon(P, V(0.44, -0.62, -0.05), U, W2, 0.13, 6, K_WHEEL)
-  ngon(P, V(-0.44, -0.62, -0.05), U, W2, 0.13, 6, K_WHEEL)
-  ngon(P, V(0.0, -0.64, -0.88), U, W2, 0.11, 6, K_WHEEL)
+  w.lines = {}   -- optional line details (none at present)
 
   -- tail
   w.vtail = has[6] and not has[4] and not has[5]
@@ -592,15 +699,15 @@ local function buildStatic(w)
     local L, c35, s35 = 0.75, cos(rad(35)), sin(rad(35))
     for _, s in ipairs({1, -1}) do
       quad(P, V(s*0.03, 0.04, 1.62), V(s*(0.03 + L*c35), 0.04 + L*s35, 1.72),
-           V(s*(0.03 + L*c35), 0.04 + L*s35, STAB_HINGE), V(s*0.03, 0.04, STAB_HINGE), K_AIRFRAME)
+           V(s*(0.03 + L*c35), 0.04 + L*s35, STAB_HINGE), V(s*0.03, 0.04, STAB_HINGE), w.K.tail)
     end
   else
-    hplate(P, -0.70, 0.70, 0.02, 1.70, STAB_HINGE, K_AIRFRAME)
-    quad(P, V(0, 0.04, 1.50), V(0, 0.62, 1.82), V(0, 0.62, FIN_HINGE), V(0, 0.04, FIN_HINGE), K_FIN)
-    if not has[4] then hplate(P, -0.68, 0.68, 0.02, STAB_HINGE, STAB_HINGE + 0.15, K_AIRFRAME) end
+    hplate(P, -0.70, 0.70, 0.02, 1.70, STAB_HINGE, w.K.tail)
+    quad(P, V(0, 0.04, 1.50), V(0, 0.62, 1.82), V(0, 0.62, FIN_HINGE), V(0, 0.04, FIN_HINGE), w.K.fin)
+    if not has[4] then hplate(P, -0.68, 0.68, 0.02, STAB_HINGE, STAB_HINGE + TAIL_CHORD, w.K.tail) end
     if not has[5] then
-      quad(P, V(0, 0.04, FIN_HINGE), V(0, 0.62, FIN_HINGE), V(0, 0.62, FIN_HINGE + 0.13),
-           V(0, 0.04, FIN_HINGE + 0.13), K_FIN)
+      quad(P, V(0, 0.04, FIN_HINGE), V(0, 0.62, FIN_HINGE), V(0, 0.62, FIN_HINGE + RUD_CHORD),
+           V(0, 0.04, FIN_HINGE + RUD_CHORD), w.K.fin)
     end
   end
 
@@ -629,17 +736,17 @@ buildHingeDefs = function(w)
     if sl then
       for _, sd in ipairs({RIGHT, LEFT}) do
         add(t, sd, V(sd*sl[1], WING_Y - 0.01, WING_HINGE), V(sd*sl[2], WING_Y - 0.01, WING_HINGE), up,
-            SURF_CHORD, (t == 1) and K_FLAP or K_SURF, ((sd == RIGHT) and 'R ' or 'L ') .. SURF_LABEL[t])
+            SURF_CHORD, (t == 1) and w.K.flap or w.K.surf, ((sd == RIGHT) and 'R ' or 'L ') .. SURF_LABEL[t])
       end
     end
   end
-  add(4, RIGHT, V(0.03, 0.02, STAB_HINGE), V(0.68, 0.02, STAB_HINGE), up, 0.15, K_SURF, nil)
-  add(4, RIGHT, V(-0.03, 0.02, STAB_HINGE), V(-0.68, 0.02, STAB_HINGE), up, 0.15, K_SURF, 'Elevator')
-  add(5, RIGHT, V(0, 0.04, FIN_HINGE), V(0, 0.62, FIN_HINGE), V(1, 0, 0), 0.13, K_RUDDER, 'Rudder')
+  add(4, RIGHT, V(0.03, 0.02, STAB_HINGE), V(0.68, 0.02, STAB_HINGE), up, TAIL_CHORD, w.K.surf, nil)
+  add(4, RIGHT, V(-0.03, 0.02, STAB_HINGE), V(-0.68, 0.02, STAB_HINGE), up, TAIL_CHORD, w.K.surf, 'Elevator')
+  add(5, RIGHT, V(0, 0.04, FIN_HINGE), V(0, 0.62, FIN_HINGE), V(1, 0, 0), RUD_CHORD, w.K.rud, 'Rudder')
   local L, c35, s35 = 0.75, cos(rad(35)), sin(rad(35))
   for _, sd in ipairs({RIGHT, LEFT}) do
     add(6, sd, V(sd*0.03, 0.05, STAB_HINGE), V(sd*(0.03 + L*c35), 0.05 + L*s35, STAB_HINGE),
-        V(-sd*s35, c35, 0), 0.15, K_SURF, ((sd == RIGHT) and 'R ' or 'L ') .. 'vee')
+        V(-sd*s35, c35, 0), TAIL_CHORD, w.K.surf, ((sd == RIGHT) and 'R ' or 'L ') .. 'vee')
   end
   w.hdefs = defs
 end
@@ -694,7 +801,7 @@ local function buildDynamic(w, vw, f, key)
     local t = a.type
     local dt = defs[t]
     if dt then
-      local pct = chanPercent(w, i)
+      local pct = outputPercent(w, i)   -- final output, as in Companion's Channel Outputs
       if pct > 125 then pct = 125 elseif pct < -125 then pct = -125 end
       local e = cache[i]
       local same = e and e.t == t and e.side == a.side and e.rot == a.rot
@@ -838,7 +945,7 @@ local function buildCache(w, vi, r)
     end
     for _, poly in ipairs(w.static) do for j = 1, #poly do acc(poly[j]) end end
     acc(V(0, 0.55, -1.18)); acc(V(0, -0.55, -1.18)); acc(V(0.55, 0, -1.18)); acc(V(-0.55, 0, -1.18))
-    acc(V(0, 0.85, 2.1)); acc(V(0, -0.2, 2.2))
+    acc(V(0, 0.85, 2.15)); acc(V(0, -0.25, 2.2))   -- room for deflected tail surfaces
     local s = math.min((r.w - 16) / (maxx - minx), (r.h - 28) / (maxy - miny))
     c.f = {s = s, ox = r.x + r.w / 2 - (minx + maxx) / 2 * s,
            oy = r.y + 18 + (r.h - 18) / 2 + (miny + maxy) / 2 * s}
@@ -873,7 +980,7 @@ local function buildCache(w, vi, r)
       local k = CAM_D / (CAM_D - z) * f.s
       return f.ox + x*k, f.oy - y*k
     end
-    local grid, gy = {}, -0.78
+    local grid, gy = {}, -0.62     -- ground just below the prop disc
     for i = -4, 4 do
       local g = i * 0.75
       for _, seg in ipairs({{V(g, gy, -3), V(g, gy, 3.5)}, {V(-3, gy, g + 0.25), V(3, gy, g + 0.25)}}) do
@@ -898,6 +1005,15 @@ local function buildCache(w, vi, r)
       blades[#blades + 1] = {hx, hy, ex, ey}
     end
     c.blades = blades
+    -- thin bar across the full disc diameter (shown at idle)
+    local R, hw, ba = 0.55, 0.035, rad(20)
+    local ux, uy, vx, vy = cos(ba), sin(ba), -sin(ba), cos(ba)
+    local bar = {x = {}, y = {}, c = lcd.RGB(120, 130, 150)}
+    local corners = {{R, hw}, {-R, hw}, {-R, -hw}, {R, -hw}}
+    for j, cr in ipairs(corners) do
+      bar.x[j], bar.y[j] = prc(V(cr[1]*ux + cr[2]*vx, cr[1]*uy + cr[2]*vy, -1.2))
+    end
+    c.bar = bar
     c.stage = 3
   end
   return nil
@@ -937,9 +1053,15 @@ local function drawModel(w, r, vi, showLabels)
   end
   local gk = C.grid
   for _, g in ipairs(c.grid) do lcd.drawLine(g[1], g[2], g[3], g[4], SOLID, gk) end
-  drawItem(c.disc)
-  local bk = C.blade
-  for _, b in ipairs(c.blades) do lcd.drawLine(b[1], b[2], b[3], b[4], SOLID, bk) end
+  if throttlePct(w) > -99 then
+    -- throttle open: spinning prop disc
+    drawItem(c.disc)
+    local bk = C.blade
+    for _, b in ipairs(c.blades) do lcd.drawLine(b[1], b[2], b[3], b[4], SOLID, bk) end
+  else
+    -- idle: stopped prop shown as a bar
+    drawItem(c.bar)
+  end
 
   -- moving surfaces: project, sort, then merge with the cached static list
   local dyn, labels = buildDynamic(w, vw, c.f, w.cacheKey)
@@ -1097,7 +1219,7 @@ local function drawOtherChannels(w, X, Y, W, H)
     local a = w.chAssign[i]
     if not w.surf[a.type].draw then
     local nm = w.outName[i]
-    local v = rnd(chanPercent(w, i) * a.rot)
+    local v = rnd(outputPercent(w, i) * a.rot)
     -- skip unused channels (no name and centred) to save space
     if nm ~= '' or v ~= 0 then
       if y + th > Y + H then break end
@@ -1339,6 +1461,7 @@ local function drawPage2(w, X, Y, W, H)
   button(w, sx, Y + bh + 6, scrollW, autoH, 'Auto', function()
     clearSaved()
     autoAssign(w)
+    setThrottleChannel(w)
   end, false)
   button(w, sx, Y + bh + autoH + 12, scrollW, bh, 'v', function()
     w.scroll = math.min(N_CHANS - visible, w.scroll + visible)
@@ -1399,6 +1522,7 @@ local function create(zone, options)
   cacheSourceIds(w)
   refreshLSDefs(w)
   if not loadAssign(w) then autoAssign(w) end
+  setThrottleChannel(w)
   return w
 end
 
@@ -1406,6 +1530,8 @@ local function update(w, options)
   w.options = options
   w.view = math.max(1, math.min(4, (options and options.View) or 1))
   w.showLabels = not (options and options.Labels == 0)
+  setThrottleChannel(w)
+  if colourSet(w) then w.meshDirty = true end   -- rebuild with new colours
 end
 
 local function background(w)
@@ -1466,11 +1592,23 @@ local function refresh(w, event, touchState)
   end
 end
 
+-- colour flag as built by lcd.RGB (RGB565 << 16 | RGB_FLAG), computed in Lua so
+-- the option defaults don't depend on the lcd library at load time
+local function rgbFlag(r, g, b)
+  local v = floor(r / 8) * 2048 + floor(g / 4) * 32 + floor(b / 8)
+  return v * 0x10000 + 0x8000
+end
+
 return {
   name = 'OTXSim',
   options = {
     {'View', VALUE, 1, 1, 4},   -- 1=3/4 2=Rear 3=Side 4=Top (view when not full screen)
     {'Labels', BOOL, 1},        -- show surface name/deflection tags
+    {'ThrCh', VALUE, 0, 0, 16}, -- throttle channel for the prop display (0 = auto-detect)
+    {'Wings', COLOR, rgbFlag(238, 241, 247)},
+    {'Fuselage', COLOR, rgbFlag(238, 241, 247)},
+    {'Tail', COLOR, rgbFlag(238, 241, 247)},
+    {'Surfaces', COLOR, rgbFlag(95, 240, 255)},   -- movable control surfaces
   },
   create = create,
   update = update,
